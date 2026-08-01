@@ -187,12 +187,15 @@ def fragment_url(h: dict) -> str:
     Контекст не добавляем — начала и конца достаточно, а склейка соседних
     блоков в индексе делает префикс/суффикс ненадёжными.
     """
-    url = (h.get("url") or "").split("#")[0]
+    raw = h.get("url") or ""
+    url = raw.split("#")[0]
     if not url:
         return ""
     try:
         from urllib.parse import urlparse, quote
-        parsed = urlparse(url)
+        parsed = urlparse(raw)
+        if parsed.scheme == "file":
+            return raw         # десктопная выдержка: file://…#page=N из «Просмотра»
         if parsed.scheme not in ("http", "https"):
             return ""          # javascript: и прочее из недоверенных выгрузок
         if SPA_HOSTS.search(parsed.hostname or ""):
@@ -237,10 +240,84 @@ def _local(iso: str) -> str:
         return (iso or "")[:16].replace("T", " ")
 
 
+# ------------------------------------------------------------ цвет выдержки
+#
+# Пользователь выбирает цвет хоткеем, значит должен уметь спросить «покажи всё
+# красное». Браузер пишет hex, десктоп — слово; сводим и то и другое к имени
+# оттенка и позволяем фильтровать по нему.
+
+_COLOR_WORDS = {
+    "красный": "red", "красное": "red", "красные": "red", "red": "red",
+    "розовый": "pink", "розовое": "pink", "розовые": "pink", "pink": "pink",
+    "оранжевый": "orange", "оранжевое": "orange", "оранжевые": "orange", "orange": "orange",
+    "жёлтый": "yellow", "желтый": "yellow", "жёлтое": "yellow", "желтое": "yellow",
+    "жёлтые": "yellow", "желтые": "yellow", "yellow": "yellow",
+    "зелёный": "green", "зеленый": "green", "зелёное": "green", "зеленое": "green",
+    "зелёные": "green", "зеленые": "green", "green": "green",
+    "бирюзовый": "teal", "бирюзовое": "teal", "бирюзовые": "teal", "teal": "teal",
+    "синий": "blue", "синее": "blue", "синие": "blue", "голубой": "blue",
+    "голубое": "blue", "голубые": "blue", "blue": "blue",
+    "фиолетовый": "purple", "фиолетовое": "purple", "фиолетовые": "purple",
+    "сиреневый": "purple", "purple": "purple",
+    "коричневый": "brown", "коричневое": "brown", "коричневые": "brown", "brown": "brown",
+    "серый": "gray", "серое": "gray", "серые": "gray", "gray": "gray", "grey": "gray",
+}
+
+_COLOR_RU = {
+    "red": "красный", "pink": "розовый", "orange": "оранжевый", "yellow": "жёлтый",
+    "green": "зелёный", "teal": "бирюзовый", "blue": "синий", "purple": "фиолетовый",
+    "brown": "коричневый", "gray": "серый",
+}
+
+
+def _hue_name(color: str) -> str:
+    """Имя оттенка для hex-цвета или именованного цвета десктопного захвата."""
+    c = str(color or "").strip().lower()
+    if c in ("yellow", "green", "blue", "red"):
+        return c
+    m = re.fullmatch(r"#([0-9a-f]{6})", c)
+    if not m:
+        return ""
+    r, g, b = (int(m.group(1)[i:i + 2], 16) / 255 for i in (0, 2, 4))
+    mx, mn = max(r, g, b), min(r, g, b)
+    light = (mx + mn) / 2
+    if mx == mn:
+        return "gray"
+    d = mx - mn
+    sat = d / (2 - mx - mn) if light > 0.5 else d / (mx + mn)
+    if sat < 0.15:
+        return "gray"
+    if mx == r:
+        h = ((g - b) / d) % 6
+    elif mx == g:
+        h = (b - r) / d + 2
+    else:
+        h = (r - g) / d + 4
+    h *= 60
+    if h < 15 or h >= 345:
+        return "red"
+    if h < 45:
+        return "brown" if sat < 0.4 else "orange"
+    if h < 70:
+        return "yellow"
+    if h < 160:
+        return "green"
+    if h < 200:
+        return "teal"
+    if h < 255:
+        return "blue"
+    if h < 300:
+        return "purple"
+    return "pink"
+
+
 def _fmt(h: dict[str, Any], index: int | None = None) -> str:
     head = f"[{index}] " if index is not None else ""
     tags = _tags(h)
     label = " ".join("#" + t for t in tags) if tags else NO_TAG
+    hue = _hue_name(h.get("color") or "")
+    if hue and hue != "gray":
+        label += ", " + _COLOR_RU.get(hue, hue)
     when = (h.get("createdAt") or "")[:10]
     lines = [
         f"{head}({label}, {when}) источник: {h.get('title') or h.get('conv')}",
@@ -260,6 +337,7 @@ def _fmt(h: dict[str, Any], index: int | None = None) -> str:
 def search_highlights(
     query: str = "",
     tag: str = "",
+    color: str = "",
     source: str = "",
     site: str = "",
     since: str = "",
@@ -270,6 +348,8 @@ def search_highlights(
 
     query    — слова для поиска по тексту выдержки и заметке (регистр не важен);
     tag      — тема без решётки, например «найм»;
+    color    — цвет выделения: «красный», «зелёный», «жёлтый», «синий»…
+               (по-русски или по-английски, можно и hex вида #ef9a9a);
     source   — часть названия страницы или чата;
     site     — домен, например «stratechery.com»;
     since    — дата YYYY-MM-DD, вернуть только свежее;
@@ -282,6 +362,16 @@ def search_highlights(
     if tag:
         t = tag.lstrip("#").lower()
         items = [h for h in items if t in _tags(h)]
+    if color:
+        want = color.strip().lower()
+        if want.startswith("#"):
+            items = [h for h in items if str(h.get("color") or "").lower() == want]
+        else:
+            canon = _COLOR_WORDS.get(want, "")
+            if not canon:
+                known = ", ".join(sorted({_COLOR_RU[v] for v in _COLOR_WORDS.values()}))
+                return f"Не понял цвет «{color}». Понимаю: {known} — или hex вида #ef9a9a."
+            items = [h for h in items if _hue_name(h.get("color") or "") == canon]
     if untagged:
         items = [h for h in items if not _tags(h)]
     if source:

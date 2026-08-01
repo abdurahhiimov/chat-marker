@@ -46,16 +46,30 @@ BACKUPS_KEEP = 30
 NO_TAG = "без темы"
 NO_TAG_COLOR = "#b0b3ba"
 HEADER = "<!-- chatmarker:generated -->\n"
-BUILD = "15"   # версия сборщика: меняется — библиотека пересобирается принудительно
+BUILD = "16"   # версия сборщика: меняется — библиотека пересобирается принудительно
 
 
 # ---------------------------------------------------------------- где корень
 
 def find_drive_root() -> Path:
-    """Ищем папку Google Drive: переменная окружения, новый путь macOS, старый."""
+    """Где лежит библиотека: переменная окружения → root.txt → автопоиск Drive.
+
+    root.txt пишет установка; агент и MCP всегда ходили через него, а ручной
+    запуск library.py — нет, и падал «Не нашёл Google Drive», хотя путь давно
+    записан. Теперь источник правды один для всех точек входа.
+    """
     env = os.environ.get("CHATMARKER_ROOT", "").strip()
     if env:
         return Path(env).expanduser()
+
+    stored = Path.home() / ".chatmarker" / "root.txt"
+    try:
+        if stored.is_file():
+            first = stored.read_text(encoding="utf-8").strip().splitlines()
+            if first and first[0].strip():
+                return Path(first[0].strip()).expanduser()
+    except OSError:
+        pass
 
     home = Path.home()
     candidates: list[Path] = []
@@ -185,8 +199,13 @@ def ingest(root: Path, paths: dict[str, Path]) -> int:
     try:
         if not downloads.is_dir():
             return 0
+        # Смотрим и на один уровень подпапок: «прибраться в Загрузках» — очень
+        # естественное желание, и раньше оно молча ломало всю автоматику
+        # (файлы копились в ~/Downloads/Выдержки, а библиотека оставалась пустой).
+        patterns = ("highlights*.json", "выдержки*.json",
+                    "*/highlights*.json", "*/выдержки*.json")
         files = sorted(
-            [f for pat in ("highlights*.json", "выдержки*.json") for f in downloads.glob(pat)],
+            [f for pat in patterns for f in downloads.glob(pat) if f.is_file()],
             key=lambda f: f.stat().st_mtime,
         )
     except OSError:      # нет прав на Загрузки (TCC) — просто пересобираем без ingest
@@ -281,12 +300,15 @@ def fragment_url(h: dict) -> str:
     Контекст не добавляем — начала и конца достаточно, а склейка соседних
     блоков в индексе делает префикс/суффикс ненадёжными.
     """
-    url = (h.get("url") or "").split("#")[0]
+    raw = h.get("url") or ""
+    url = raw.split("#")[0]
     if not url:
         return ""
     try:
         from urllib.parse import urlparse, quote
-        parsed = urlparse(url)
+        parsed = urlparse(raw)
+        if parsed.scheme == "file":
+            return raw         # десктопная выдержка: file://…#page=N из «Просмотра»
         if parsed.scheme not in ("http", "https"):
             return ""          # javascript: и прочее из недоверенных выгрузок
         if SPA_HOSTS.search(parsed.hostname or ""):
@@ -346,9 +368,20 @@ def tags_of(h: dict[str, Any]) -> list[str]:
 
 HEX_RE = re.compile(r"#[0-9a-fA-F]{6}")
 
+# Десктопные захваты (Hammerspoon) пишут цвет словом, не hex'ом.
+# Переводим в те же оттенки, что у браузерной палитры, — иначе они серели.
+NAMED_COLORS = {
+    "yellow": "#ffd54f",
+    "green": "#81c784",
+    "blue": "#64b5f6",
+    "red": "#ef9a9a",
+}
+
 
 def safe_color(c) -> str:
     """Цвет из выгрузки — недоверенная строка: годится только чистый hex."""
+    if isinstance(c, str):
+        c = NAMED_COLORS.get(c.strip().lower(), c)
     return c if isinstance(c, str) and HEX_RE.fullmatch(c) else NO_TAG_COLOR
 
 
@@ -789,7 +822,10 @@ def build_dashboard(items, root, palette, docs=frozenset()) -> None:
             "fm": fmt_of(h),
             "n": h.get("note", ""),
             "s": h.get("title", ""),
-            "u": (h.get("url") or "").split("#")[0],
+            # file://…#page=N (десктопный захват) должен доехать целиком —
+            # фрагмент с номером страницы и есть ссылка «к месту»
+            "u": (h.get("url") or "") if str(h.get("url") or "").startswith("file:")
+                 else (h.get("url") or "").split("#")[0],
             "g": tags_of(h),
             "c": color_of(h),
             "ts": h.get("createdAt") or "",
@@ -956,22 +992,23 @@ const colorOf = t => PALETTE[t] || NOTAG;
 
 /* Ссылка «к месту»: текстовый фрагмент браузера. Считается на лету —
    хранить перекодированную кириллицу в файле было в разы тяжелее текста. */
-const SPA_HOSTS = /(^|\.)(claude\.ai|chatgpt\.com|chat\.openai\.com|gemini\.google\.com|aistudio\.google\.com)$/i;
+const SPA_HOSTS = /(^|\\.)(claude\\.ai|chatgpt\\.com|chat\\.openai\\.com|gemini\\.google\\.com|aistudio\\.google\\.com)$/i;
 function fragUrl(h) {
   const base = h.u || "";
   if (!base) return "";
   try {
     const u = new URL(base);
+    if (u.protocol === "file:") return base;   // десктопная выдержка: file://…#page=N
     if (u.protocol !== "http:" && u.protocol !== "https:") return "";
     if (SPA_HOSTS.test(u.hostname)) return base;
   } catch { return ""; }
-  const ex = String(h.t || "").replace(/\s+/g, " ").trim();
+  const ex = String(h.t || "").replace(/\\s+/g, " ").trim();
   if (!ex) return base;
   const enc = t => encodeURIComponent(t).replace(/-/g, "%2D");
   let dir;
   if (ex.length > 70) {
-    const head = ex.slice(0, 40).replace(/\s\S*$/, "");
-    const tail = ex.slice(-40).replace(/^\S*\s/, "");
+    const head = ex.slice(0, 40).replace(/\\s\\S*$/, "");
+    const tail = ex.slice(-40).replace(/^\\S*\\s/, "");
     dir = enc(head) + "," + enc(tail);
   } else dir = enc(ex);
   return base + "#:~:text=" + dir;
@@ -992,7 +1029,7 @@ function match(h) {
   }
   if (state.q) {
     const blob = (h.t + " " + h.n + " " + h.s).toLowerCase();
-    return state.q.toLowerCase().split(/\s+/).every(w => blob.includes(w));
+    return state.q.toLowerCase().split(/\\s+/).every(w => blob.includes(w));
   }
   return true;
 }

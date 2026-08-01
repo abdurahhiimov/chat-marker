@@ -15,9 +15,11 @@ if [ -z "${CHATMARKER_ROOT:-}" ] && [ -s "$APP_HOME/root.txt" ]; then
 fi
 
 # есть ли вообще что переносить — чтобы не будить сборку на каждый чих в загрузках.
+# Подпапки тоже смотрим (один уровень): выгрузки часто складывают в ~/Downloads/Выдержки.
 # Без массивов: штатный bash на маке — 3.2, там пустой массив под set -u падает.
 PENDING=0
-for f in "$HOME/Downloads"/highlights*.json "$HOME/Downloads"/выдержки*.json; do
+for f in "$HOME/Downloads"/highlights*.json "$HOME/Downloads"/выдержки*.json \
+         "$HOME/Downloads"/*/highlights*.json "$HOME/Downloads"/*/выдержки*.json; do
   [ -e "$f" ] && PENDING=1
 done
 [ "$PENDING" -eq 0 ] && exit 0
