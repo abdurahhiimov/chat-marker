@@ -126,13 +126,16 @@ if [ -d "/Applications/Claude.app" ] || [ -d "$HOME/Applications/Claude.app" ] \
 fi
 
 DEPS="openpyxl python-docx"
-[ -n "$HAS_CLAUDE" ] && DEPS="$DEPS mcp[cli]"
+# mcp 2.x переехал API (mcp.server.fastmcp больше нет) — держимся 1.x,
+# иначе сервер не стартует ни у одной свежей установки.
+MCP_PIN=""
+[ -n "$HAS_CLAUDE" ] && MCP_PIN="mcp[cli]>=1.2,<2"
 # shellcheck disable=SC2086
-if "$APP_HOME/venv/bin/pip" install --quiet $DEPS >/dev/null 2>&1; then
-  ok "Библиотеки поставлены ($DEPS)"
+if "$APP_HOME/venv/bin/pip" install --quiet $DEPS ${MCP_PIN:+"$MCP_PIN"} >/dev/null 2>&1; then
+  ok "Библиотеки поставлены ($DEPS${MCP_PIN:+ $MCP_PIN})"
 else
   warn "Не всё поставилось. Таблица и .docx могут не собраться."
-  warn "Руками: $APP_HOME/venv/bin/pip install $DEPS"
+  warn "Руками: $APP_HOME/venv/bin/pip install $DEPS ${MCP_PIN:+'$MCP_PIN'}"
 fi
 
 # ------------------------------------------------------------------ 3. где библиотека
@@ -216,16 +219,32 @@ if not isinstance(cfg, dict):
     cfg = {}
 
 cfg.setdefault("mcpServers", {})
+
+# Пути пользователя из прежнего конфига сохраняем, а не затираем.
+# Выкидываем только Inbox старого корня (после переезда библиотеки он
+# устроил бы двойной ingest) и дубликаты обязательных путей.
+required = [f"{root}/00 Inbox", f"{home}/Downloads"]
+old_env = (cfg["mcpServers"].get("highlights") or {}).get("env") or {}
+extras = []
+for p in (old_env.get("HIGHLIGHTS_PATH") or "").split(":"):
+    p = p.strip()
+    if not p or p in required or p in extras:
+        continue
+    if p.endswith("/00 Inbox"):
+        continue
+    extras.append(p)
+
 cfg["mcpServers"]["highlights"] = {
     "command": f"{app}/venv/bin/python",
     "args": [f"{app}/highlights_mcp.py"],
     "env": {
-        "HIGHLIGHTS_PATH": f"{root}/00 Inbox:{home}/Downloads",
+        "HIGHLIGHTS_PATH": ":".join(required + extras),
         "CHATMARKER_ROOT": root,
     },
 }
 cfg_path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
-print("  \033[32m✓\033[0m Сервер highlights прописан, чужие серверы не тронуты")
+tail = f" (+ твои пути: {', '.join(extras)})" if extras else ""
+print(f"  \033[32m✓\033[0m Сервер highlights прописан, чужие серверы не тронуты{tail}")
 PYEOF
 else
   warn "Claude Desktop не установлен — пропускаю."
@@ -244,17 +263,22 @@ fi
 
 # ------------------------------------------------------------------ 7. хоткей
 
-say "7. Хоткей вне браузера (по желанию)"
+say "7. Захват из любых программ (PDF, Word, «Просмотр», десктопный Claude)"
 
-if [ -d "/Applications/Hammerspoon.app" ]; then
+if [ -d "/Applications/Hammerspoon.app" ] || [ -d "$HOME/Applications/Hammerspoon.app" ]; then
   mkdir -p "$HOME/.hammerspoon"
   cp "$KIT/extras/hammerspoon/chatmarker.lua" "$HOME/.hammerspoon/chatmarker.lua" 2>/dev/null
   INIT="$HOME/.hammerspoon/init.lua"
   touch "$INIT"
   grep -q 'chatmarker' "$INIT" || printf '\nrequire("chatmarker")\n' >> "$INIT"
   ok "Hammerspoon настроен — открой его и нажми Reload Config"
+  warn "Он сам попросит «Универсальный доступ» — без этого хоткеи молчат"
 else
-  warn "Hammerspoon не стоит — выделять можно только в браузере. Этого хватает."
+  warn "Hammerspoon не установлен. Это не мелочь: PDF в браузере не выделяется"
+  warn "вообще (у Chrome там нет текстового слоя), а рабочие документы — это"
+  warn "как раз PDF и Word. Hammerspoon закрывает их одним хоткеем ⌃⌥⌘1…4."
+  echo "     Поставить: https://www.hammerspoon.org (кнопка Download, перетащить в Программы)"
+  echo "     Потом ещё раз:  bash ~/.chatmarker/update.sh  — конфиг допишется сам"
 fi
 
 # ------------------------------------------------------------------ 8. обновление и удаление

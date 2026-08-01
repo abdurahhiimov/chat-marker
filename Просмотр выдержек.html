@@ -204,6 +204,7 @@ function fragUrl(h) {
   if (!base) return "";
   try {
     const u = new URL(base);
+    if (u.protocol === "file:") return base;   // десктопная выдержка: file://…#page=N
     if (u.protocol !== "http:" && u.protocol !== "https:") return "";
     if (SPA_HOSTS.test(u.hostname)) return base;
   } catch { return ""; }
