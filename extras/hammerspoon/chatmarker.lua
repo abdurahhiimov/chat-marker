@@ -5,13 +5,19 @@
 --- выделил текст → нажал → кусок улетел в ту же базу, что и браузерные выдержки,
 --- с пометкой, из какого приложения и окна он взят.
 ---
---- Хоткеи (⌃⌥⌘ — control+option+command, они почти гарантированно свободны):
+--- Хоткеи (⌃⌥⌘ — control+option+command):
 ---   ⌃⌥⌘1  формулировка (жёлтый)
 ---   ⌃⌥⌘2  идея (зелёный)
 ---   ⌃⌥⌘3  факт / метод (синий)
 ---   ⌃⌥⌘4  спорно / вернуться (красный)
 ---   ⌃⌥⌘N  захватить и сразу написать заметку
 ---   ⌃⌥⌘O  открыть папку с базой
+---
+--- Почему именно ⌃⌥⌘, а не что-то короче: Alt+1…4 уже заняты браузерным
+--- маркером — он ловит их на странице. Сократишь эти хоткеи до Alt+цифра —
+--- в браузере они перестанут доходить до маркера, и сломается непонятно что
+--- непонятно почему. Три клавиши — осознанный минимум. Если меняешь,
+--- выбирай сочетание, которого нет ни в браузере, ни в системе.
 
 local M = {}
 
@@ -130,6 +136,41 @@ local function uid()
   return string.format("hs%x%x", math.random(0, 0xffffff), math.floor(hs.timer.absoluteTime() % 0xffff))
 end
 
+--- Кодирует путь для file://-ссылки. Работает побайтово, поэтому кириллица
+--- в имени файла кодируется корректно (по байту UTF-8 за раз).
+local function encodePath(p)
+  return (p:gsub("[^%w%-%._~/]", function(c)
+    return string.format("%%%02X", string.byte(c))
+  end))
+end
+
+--- «Просмотр» пишет номер страницы прямо в заголовок окна:
+---   «ОТЧЕТ.pdf – Страница 10 из 111»
+--- Парсим номер, а путь к файлу спрашиваем у Preview через AppleScript.
+--- Получается ссылка «к месту» для десктопных выдержек — file://…#page=N,
+--- дашборд открывает её в браузере ровно на нужной странице.
+local function placeLink(app, winTitle)
+  local page = winTitle:match("[Сс]траница (%d+)") or winTitle:match("[Pp]age (%d+)")
+  if not page then return "", nil end
+
+  local url = ""
+  if app and app:bundleID() == "com.apple.Preview" then
+    local ok, path = pcall(function()
+      local good, result = hs.osascript.applescript(
+        'tell application "Preview" to get path of front document')
+      return good and result or nil
+    end)
+    if ok and type(path) == "string" and path ~= "" then
+      url = "file://" .. encodePath(path) .. "#page=" .. page
+    end
+  end
+  return url, tonumber(page)
+end
+
+--- Два нажатия подряд на одном выделении — почти всегда случайность,
+--- а не желание сохранить дважды.
+local lastCapture = { text = nil, app = nil, at = 0 }
+
 local function capture(colorId, colorLabel, withNote)
   local text = grabSelection()
   if not text or text:gsub("%s", "") == "" then
@@ -139,12 +180,25 @@ local function capture(colorId, colorLabel, withNote)
 
   local app = hs.application.frontmostApplication()
   local appName = app and app:name() or "неизвестно"
+
+  local nowSec = hs.timer.secondsSinceEpoch()
+  if text == lastCapture.text and appName == lastCapture.app
+     and (nowSec - lastCapture.at) < 3 then
+    hs.alert.show("Уже сохранено", 0.6)
+    return
+  end
+  lastCapture = { text = text, app = appName, at = nowSec }
+
   local win = hs.window.focusedWindow()
   local winTitle = win and win:title() or ""
   local title = winTitle ~= "" and (appName .. " — " .. winTitle) or appName
+  local url, page = placeLink(app, winTitle)
 
   local note = ""
   if withNote then
+    -- hs.dialog активирует Hammerspoon: если открыта консоль, она вылезет
+    -- поверх всего экрана. Прячем её заранее.
+    if hs.console.hswindow() then hs.closeConsole() end
     local button, input = hs.dialog.textPrompt(
       "Заметка к выдержке",
       text:sub(1, 160) .. (#text > 160 and "…" or "") .. "\n\nСлово с решёткой, например #найм, соберёт выдержку в тему.",
@@ -158,7 +212,8 @@ local function capture(colorId, colorLabel, withNote)
     id = uid(),
     conv = "desktop::" .. appName,
     site = "desktop",
-    url = "",
+    url = url,
+    page = page,
     title = title,
     color = colorId,
     colorLabel = colorLabel,
@@ -176,16 +231,30 @@ local function capture(colorId, colorLabel, withNote)
   end
 end
 
+--- Физические коды клавиш (ANSI). Буквенные имена ломаются на неанглийской
+--- раскладке: hs.keycode не находит 'n' в русской раскладке, сыплет
+--- предупреждения и вешает хоткей на «т». Коды от раскладки не зависят.
+local KEYCODES = { ["1"] = 18, ["2"] = 19, ["3"] = 20, ["4"] = 21, n = 45, o = 31 }
+
 function M.start()
   math.randomseed(os.time())
   ensureVault()
 
+  -- Без «Универсального доступа» хоткеи молча не работают — ни звука, ни плашки.
+  -- Проверяем сразу и просим права системным диалогом, чтобы не гадать.
+  if not hs.accessibilityState(true) then
+    hs.alert.show(
+      "Chat Marker: дай Hammerspoon «Универсальный доступ»\n" ..
+      "Настройки → Конфиденциальность и безопасность → Универсальный доступ.\n" ..
+      "Без этого хоткеи захвата не работают.", 6)
+  end
+
   local mods = { "ctrl", "alt", "cmd" }
   for key, c in pairs(COLORS) do
-    hs.hotkey.bind(mods, key, function() capture(c.id, c.label, false) end)
+    hs.hotkey.bind(mods, KEYCODES[key], function() capture(c.id, c.label, false) end)
   end
-  hs.hotkey.bind(mods, "n", function() capture("yellow", "формулировка", true) end)
-  hs.hotkey.bind(mods, "o", function() hs.execute("open '" .. ROOT .. "'") end)
+  hs.hotkey.bind(mods, KEYCODES.n, function() capture("yellow", "формулировка", true) end)
+  hs.hotkey.bind(mods, KEYCODES.o, function() hs.execute("open '" .. ROOT .. "'") end)
 
   print("[chatmarker] хоткеи повешены, библиотека: " .. ROOT)
 end
