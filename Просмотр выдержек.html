@@ -514,17 +514,23 @@ function mergeAll(files) {
   const items = [...byId.values()].sort((a, b) =>
     String(a.createdAt || "").localeCompare(String(b.createdAt || "")));
 
-  const payload = items.map(h => ({
-    d: String(h.createdAt || "").slice(0, 10),
-    t: String(h.text || ""),
-    fm: fmtOf(h),
-    n: String(h.note || ""),
-    s: String(h.title || ""),
-    u: String(h.url || "").split("#")[0],
-    g: tagsOf(h).filter(t => !deadTags.has(t)),
-    c: safeColor(h.color),
-    ts: String(h.createdAt || ""),
-  }));
+  const payload = items.map(h => {
+    const rawUrl = String(h.url || "");
+    /* У десктопного захвата номер страницы живёт во фрагменте — режем только у веба.
+       Раньше срезали всем, и ссылка «к месту» из «Просмотра» теряла страницу. */
+    const u = rawUrl.startsWith("file:") ? rawUrl : rawUrl.split("#")[0];
+    return {
+      d: String(h.createdAt || "").slice(0, 10),
+      t: String(h.text || ""),
+      fm: fmtOf(h),
+      n: String(h.note || ""),
+      s: String(h.title || ""),
+      u,
+      g: tagsOf(h).filter(t => !deadTags.has(t)),
+      c: safeColor(h.color),
+      ts: String(h.createdAt || ""),
+    };
+  });
 
   /* Цвет темы, которой нет в списке тем, берём у её же выдержек — иначе
      на дашборде она станет серой, хотя на странице была цветной. */
