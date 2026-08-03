@@ -886,6 +886,17 @@
     fab.addEventListener('click', () => togglePanel());
   }
 
+  /* Стили живут в <head>, интерфейс — в <body>. Одностраничные приложения,
+     которые переписывают <head> при переходах (LinkedIn так делает), могут
+     снести стили, оставив интерфейс на месте — и тогда вся панель, которая
+     всегда в DOM и прячется только стилями, вываливается на страницу голым
+     текстом. Проверка дешёвая, поэтому проверяем. */
+  function keepShellAlive() {
+    // textContent переживает открепление — цветовые правила вернутся вместе с ним
+    if (!styleEl.isConnected && document.head) document.head.appendChild(styleEl);
+    if (!root.isConnected && document.body) document.body.appendChild(root);
+  }
+
   function toast(msg) {
     toastHost.innerHTML = `<div class="cm-toast">${esc(msg)}</div>`;
     setTimeout(() => { toastHost.innerHTML = ''; }, 1700);
@@ -1983,6 +1994,7 @@
     let lastPath = location.pathname;
     setInterval(() => {
       if (location.pathname !== lastPath) { lastPath = location.pathname; repaintSoon(); }
+      keepShellAlive();
     }, 800);
 
     /* characterData сознательно не слушаем: пока Claude печатает ответ,
