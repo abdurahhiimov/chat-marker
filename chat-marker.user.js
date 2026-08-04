@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Chat Marker — маркер и заметки на любой странице
 // @namespace    aziz.chatmarker
-// @version      1.2.0
+// @version      1.2.1
 // @description  Выделяй текст маркером на любом сайте, вешай тему и стиль, ищи по всей базе, выгружай в библиотеку.
 // @author       Aziz
 // @homepageURL  https://github.com/abdurahhiimov/chat-marker
